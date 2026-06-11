@@ -85,9 +85,9 @@ def strip_accents(text):
 
 PHONE_IN_TEXT = re.compile(r"0\d{8,10}|84\d{9,10}")
 
-# Cổng/ví điện tử: tiền về dạng cục, không phải credit ngân hàng lẻ -> nhóm 🟠
-EWALLET_RE = ("VIMO|NGAN LUONG|NGANLUONG|MOMO|ZALO|SHOPEE|VIETTEL|"
-              "CREDIT|VISA|MASTER")
+# Cổng/ví điện tử & thẻ tín dụng: tiền về dạng cục qua cổng -> nhóm 🟠
+EWALLET_RE = ("VIMO|PAYOO|NGAN LUONG|NGANLUONG|MOMO|ZALO|SHOPEE|VIETTEL|"
+              "9PAY|VNPAY|ONEPAY|CREDIT|VISA|MASTER|TIN DUNG")
 
 
 def is_ewallet_gateway(series):
@@ -624,6 +624,25 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
                                        bank.loc[j, "txn_id"],
                                        bank.loc[j, "credit"], 0]
     bank.drop(columns=["_owner"], inplace=True, errors="ignore")
+
+    # Post-pass COMBO: nhiều gói cùng 1 người (cùng UID + cùng giờ thanh toán)
+    # đã khớp nhưng phần lệch bù trừ nhau (tổng = 0) -> thực chất đủ tiền,
+    # ngân hàng chỉ chia khoản khác với cách ghi đơn. Gộp lại, lech = 0.
+    matched = orders[orders["match_status"] != "KHÔNG TÌM THẤY"].copy()
+    if len(matched):
+        key = matched["uid"].astype(str)
+        for k, grp in matched.groupby(key):
+            if k in ("", "nan", "None") or len(grp) < 2:
+                continue
+            # cùng thời điểm thanh toán
+            for ts, g2 in grp.groupby("order_ts"):
+                if len(g2) < 2:
+                    continue
+                if abs(g2["lech"].sum()) < 1000 and (g2["lech"].abs() > 0).any():
+                    for ii in g2.index:
+                        orders.loc[ii, "match_status"] = \
+                            "KHỚP COMBO nhiều gói (tổng khớp)"
+                        orders.loc[ii, "lech"] = 0
     return orders, bank
 
 
@@ -643,6 +662,8 @@ def error_groups(orders, bank):
             return "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)"
         if r["match_status"].startswith("KHỚP ANH EM"):
             return "🟢 Khớp anh em (chung 1 lần chuyển)"
+        if r["match_status"].startswith("KHỚP COMBO"):
+            return "🟢 Khớp combo nhiều gói (tổng khớp)"
         if r["match_status"].startswith("KHỚP QUA SĐT — số tiền NHỎ"):
             # lần thanh toán thứ 2+ -> phần thiếu nhiều khả năng là cọc/đợt trước
             pm = strip_accents(str(r.get("pay_method", "")))

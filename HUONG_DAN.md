@@ -147,3 +147,18 @@ nên Gateway dùng để kiểm chứng & gom nhóm, không dùng để dò ngư
   BÚT TOÁN (HCM dùng cột Doc No/Số CT thay thế) + đánh dấu gắn được với đơn nào,
   trạng thái, lệch, mô tả cách khớp. Hai tab này đối chiếu hai chiều giúp soi
   nhanh cái nào đúng/sai.
+
+
+## Cập nhật xử lý cổng + combo + tìm kiếm chéo  ⭐
+- **Cổng/thẻ tín dụng**: nhận diện thêm Payoo, 9Pay, VNPay, OnePay (cùng VIMO,
+  Momo, Zalopay, ViettelPay...). Đơn qua cổng xếp nhóm 🟠 và KHÔNG hiển thị
+  số tiền như khoản lệch (tiền về qua settlement của cổng, không phải credit lẻ).
+- **Combo nhiều gói cùng người**: nhiều gói cùng UID + cùng giờ thanh toán mà
+  phần lệch bù trừ nhau (tổng khớp) -> gộp thành 🟢 "Khớp combo nhiều gói",
+  lech = 0 (vd 366346066: 9.275.000 + 4.740.000 = 10.800.000 + 3.215.000).
+- **Tìm kiếm chéo**: gõ SĐT/UID ở tab "Nguồn doanh thu điền tay" thì tab
+  "Sao Kê Ngân Hàng" cũng tự lọc đúng giao dịch đã khớp với đơn đó.
+- **Tab Nguồn doanh thu điền tay**: cột "Lệch số tiền" hiển thị rõ giá trị lệch
+  từng đơn (trống với đơn qua cổng).
+- Metric tổng quan: "Đơn cần xử lý" chỉ đếm 🔴 + 🟡 lệch thật; đơn qua cổng
+  tách riêng, không tính là tiền lệch.

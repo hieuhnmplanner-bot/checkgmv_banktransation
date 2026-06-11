@@ -23,6 +23,7 @@ GROUP_COLORS = {
     "✅ Khớp đúng": "#2e7d32",
     "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)": "#66bb6a",
     "🟢 Khớp anh em (chung 1 lần chuyển)": "#4caf50",
+    "🟢 Khớp combo nhiều gói (tổng khớp)": "#388e3c",
     "🟢 Thu nhiều đợt — phần còn lại là cọc/đợt trước (lần TT thứ 2+)": "#43a047",
     "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)": "#fdd835",
     "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)": "#f9a825",
@@ -272,6 +273,8 @@ def match_desc(status):
             "Anh em chung 1 lần chuyển (cùng giờ)",
         "KHỚP ANH EM (cùng ngày+cổng)":
             "Anh em chung 1 lần chuyển (cùng ngày+cổng)",
+        "KHỚP COMBO nhiều gói (tổng khớp)":
+            "Nhiều gói cùng người — tổng tiền khớp",
         "KHỚP CHUNG 1 GIAO DỊCH (2 đơn)": "1 GD trả cho 2 đơn",
         "KHỚP GỘP 2 GIAO DỊCH (cọc + nốt)": "Cọc + chuyển nốt = 1 đơn",
         "KHỚP (lệch ngày, số tiền duy nhất)":
@@ -318,14 +321,17 @@ with tab1:
     o = orders[orders["region"].isin(sel_region)]
     b = bank[bank["account"].isin(sel_region)]
 
-    n_err = (~o["error_group"].str.startswith("✅")).sum()
-    vnd_err = o.loc[~o["error_group"].str.startswith("✅"), "lech"].abs().sum()
+    # "có vấn đề" = chưa khớp được (🔴) hoặc lệch số tiền thật (🟡 lệch);
+    # KHÔNG tính nhóm 🟢 (đã khớp) và 🟠 (qua cổng, đối soát file settlement)
+    problem = o["error_group"].str.startswith(("🔴", "🟡 Lệch"))
+    n_err = int(problem.sum())
+    vnd_err = o.loc[problem, "lech"].abs().sum()
+    n_gw = int(o["error_group"].str.startswith("🟠").sum())
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Tổng đơn", f"{len(o):,}")
     m2.metric("Doanh thu ghi nhận", fmt_vnd(o["amount"].sum()) + " đ")
-    m3.metric("Đơn có vấn đề", f"{n_err:,}",
-              delta=f"-{n_err / max(len(o), 1):.0%} tổng đơn",
-              delta_color="inverse")
+    m3.metric("Đơn cần xử lý (🔴+lệch)", f"{n_err:,}",
+              delta=f"{n_gw} đơn qua cổng", delta_color="off")
     m4.metric("Tiền lệch cần xử lý", fmt_vnd(vnd_err) + " đ")
 
     pv_cnt = (o.pivot_table(index="month", columns="error_group",
@@ -424,6 +430,10 @@ with tab6:
     d6["found"] = [found_label(s, g) for s, g in
                    zip(d6["match_status"], d6["error_group"])]
     d6["desc"] = d6["match_status"].map(match_desc)
+    # đơn qua cổng (VIMO/Payoo/thẻ): tiền về qua settlement, không tính là lệch
+    gw_mask = d6["error_group"].astype(str).str.startswith("🟠")
+    d6.loc[gw_mask, "desc"] = "Qua cổng (VIMO/Payoo/thẻ) — đối soát file settlement"
+    d6["lech_disp"] = d6["lech"].where(~gw_mask, np.nan)
     if sel_f6 != "Tất cả":
         d6 = d6[d6["found"] == sel_f6]
 
@@ -433,12 +443,12 @@ with tab6:
                 f"{(d6['found'] == '⚠️ Qua cổng').sum()}")
     show6 = d6[["region", "bank_time", "gateway", "customer", "phone", "uid",
                 "pay_time_s", "amount", "found", "paid_into", "error_group",
-                "lech", "desc"]].copy()
+                "lech_disp", "desc"]].copy()
     show6.columns = ["KV", "Bank time", "Gateway", "User Name", "Phone",
                      "UID", "Pay Time", "Real Pay(VND)", "Tìm thấy?",
-                     "Tiền về TK", "Trạng thái khớp", "Lệch", "Cách khớp"]
+                     "Tiền về TK", "Trạng thái khớp", "Lệch số tiền", "Cách khớp"]
     show6["Real Pay(VND)"] = show6["Real Pay(VND)"].map(fmt_vnd)
-    show6["Lệch"] = show6["Lệch"].map(fmt_vnd)
+    show6["Lệch số tiền"] = show6["Lệch số tiền"].map(fmt_vnd)
     st.dataframe(show6, use_container_width=True, hide_index=True, height=540)
     st.download_button("⬇️ Tải bảng này (CSV)",
                        show6.to_csv(index=False).encode("utf-8-sig"),
@@ -461,11 +471,20 @@ with tab7:
         bb7 = bb7[bb7["month"] == sel_m7]
     if search:
         s = re.sub(r"\D", "", search)
+        # các giao dịch đã khớp với đơn có SĐT/UID đang tìm
+        matched_orders = apply_search_orders(orders)
+        txn_ids = set()
+        for mt in matched_orders["matched_txn"].dropna().astype(str):
+            for t in re.split(r"[ +|]", mt):
+                if t:
+                    txn_ids.add(t)
+        cond = bb7["txn_id"].isin(txn_ids)
         if s:
-            bb7 = bb7[bb7["detail"].astype(str).str.replace(r"\D", "",
-                      regex=True).str.contains(s, na=False) |
-                      bb7["matched_order"].astype(str).str.contains(
-                          search, na=False)]
+            cond = cond | bb7["detail"].astype(str).str.replace(
+                r"\D", "", regex=True).str.contains(s, na=False)
+        cond = cond | bb7["matched_order"].astype(str).str.contains(
+            search, na=False, case=False)
+        bb7 = bb7[cond]
     if sel_f7 == "✅ Đã gắn đơn":
         bb7 = bb7[bb7["bank_group"].str.startswith("✅")]
     elif sel_f7 == "🔴 Tiền vào chưa có đơn":
