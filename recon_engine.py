@@ -39,7 +39,10 @@ def parse_date_any(series):
         out.loc[mask] = pd.to_datetime(s[mask], format=fmt, errors="coerce")
     mask = out.isna()
     if mask.any():
-        out.loc[mask] = pd.to_datetime(s[mask], errors="coerce", dayfirst=True)
+        with __import__("warnings").catch_warnings():
+            __import__("warnings").simplefilter("ignore")
+            out.loc[mask] = pd.to_datetime(s[mask], errors="coerce",
+                                           dayfirst=True)
     return out
 
 
@@ -61,6 +64,7 @@ def norm_phone(series):
 def strip_accents(text):
     if not isinstance(text, str):
         return ""
+    text = text.replace("đ", "d").replace("Đ", "D")
     return "".join(c for c in unicodedata.normalize("NFD", text)
                    if unicodedata.category(c) != "Mn").upper()
 
@@ -180,6 +184,56 @@ def load_bank(df, account_label):
     return out.reset_index(drop=True)
 
 
+def attach_manual_phone(bank, manual_df):
+    """Nối SĐT (và số cọc) từ file điền tay vào sao kê ngân hàng theo timestamp.
+
+    File điền tay = từng dòng sao kê đã được sale gắn SĐT khách + số cọc.
+    Cột số tiền có thể bị sửa tay, nhưng timestamp thì không, nên nối theo giờ
+    giao dịch. SĐT này được thêm vào phones_in_text để mọi bước khớp theo SĐT
+    đều dùng được, kể cả khi nội dung CK của ngân hàng không ghi số.
+    """
+    if manual_df is None or not len(manual_df):
+        bank["manual_phone"] = np.nan
+        bank["manual_deposit"] = np.nan
+        return bank
+    m = manual_df.copy()
+    m.columns = [str(c).strip() for c in m.columns]
+
+    def find(*keys):
+        for c in m.columns:
+            cl = strip_accents(c)
+            if any(k in cl for k in keys):
+                return c
+        return None
+
+    c_date = find("NGAY GIAO DICH")
+    c_phone = find("SO DIEN THOAI")
+    c_dep = find("SO TIEN DA DAT COC", "DAT COC")
+    if c_date is None or c_phone is None:
+        bank["manual_phone"] = np.nan
+        bank["manual_deposit"] = np.nan
+        return bank
+    m["_ts"] = parse_date_any(m[c_date])
+    m["_phone"] = norm_phone(m[c_phone])
+    m["_dep"] = vnd(m[c_dep]) if c_dep else np.nan
+    m = m[m["_ts"].notna() & m["_phone"].notna()]
+    # mỗi timestamp lấy dòng đầu có phone
+    bridge = (m.drop_duplicates("_ts")
+              .set_index("_ts")[["_phone", "_dep"]])
+    bank = bank.copy()
+    bank["manual_phone"] = bank["txn_date"].map(bridge["_phone"])
+    bank["manual_deposit"] = bank["txn_date"].map(bridge["_dep"])
+    # thêm SĐT từ điền tay vào phones_in_text (không trùng)
+    def merge_phone(row):
+        lst = list(row["phones_in_text"])
+        mp = row["manual_phone"]
+        if isinstance(mp, str) and mp and mp not in lst:
+            lst.append(mp)
+        return lst
+    bank["phones_in_text"] = bank.apply(merge_phone, axis=1)
+    return bank
+
+
 def classify_nonrevenue(bank):
     """Đánh dấu giao dịch tiền vào KHÔNG phải doanh thu khách hàng."""
     t = bank["text_norm"]
@@ -257,19 +311,22 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
                     ["LỆCH SỐ TIỀN (đúng giờ GD)", bank.loc[j, "txn_id"],
                      bank.loc[j, "credit"]]
 
-    # Pass 1 & 4
-    for window, label in ((date_window, "KHỚP ĐÚNG"), (35, "KHỚP (lệch ngày)")):
-        for i, r in orders[orders["match_status"] == "KHÔNG TÌM THẤY"].iterrows():
-            if pd.isna(r["order_date"]):
-                continue
-            cand = bank[free() & (bank["credit"] == r["expected_bank"]) &
-                        (abs((bank["txn_date"] - r["order_date"]).dt.days) <= window)]
-            if len(cand):
-                j = cand.index[0]
-                bank.loc[j, "used_by"] = r["order_id"]
-                orders.loc[i, ["match_status", "matched_txn", "matched_amount"]] = \
-                    [label, bank.loc[j, "txn_id"], bank.loc[j, "credit"]]
-        if label == "KHỚP ĐÚNG":
+    # Pass 1: số tiền đúng + ngày ±date_window (chặt)
+    for i, r in orders[orders["match_status"] == "KHÔNG TÌM THẤY"].iterrows():
+        if pd.isna(r["order_date"]):
+            continue
+        cand = bank[free() & (bank["credit"] == r["expected_bank"]) &
+                    (abs((bank["txn_date"] - r["order_date"]).dt.days)
+                     <= date_window)]
+        if len(cand):
+            j = cand.index[0]
+            bank.loc[j, "used_by"] = r["order_id"]
+            orders.loc[i, ["match_status", "matched_txn",
+                           "matched_amount"]] = \
+                ["KHỚP ĐÚNG", bank.loc[j, "txn_id"], bank.loc[j, "credit"]]
+
+    if True:
+        if True:
             # Pass 2: phone trong nội dung CK
             phone_map = {}
             for j, b in bank[free()].iterrows():
@@ -340,7 +397,7 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
     for key_cols in (["phone"], ["order_date", "sales"]):
         nf = orders[orders["match_status"] == "KHÔNG TÌM THẤY"]
         for _, grp in nf.groupby([c for c in key_cols], dropna=True):
-            if len(grp) < 2:
+            if len(grp) < 2 or len(grp) > 60:
                 continue
             idx = list(grp.index)
             for a in range(len(idx)):
@@ -368,6 +425,67 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
                                  bank.loc[j, "txn_id"],
                                  orders.loc[ii, "expected_bank"]]
                             orders.loc[ii, "lech"] = 0
+
+    # Pass 6: NEO THEO SĐT trong nội dung chuyển khoản.
+    # Khi SĐT của đơn xuất hiện trong memo của 1 giao dịch (dù số tiền lệch),
+    # đó là bằng chứng mạnh -> không để rơi vào "không tìm thấy".
+    #   credit == đơn             -> KHỚP QUA SĐT
+    #   credit lớn hơn (bội số)   -> GỘP nhiều đơn (1 CK trả nhiều bé), lech = 0
+    #   credit nhỏ hơn            -> cọc/thiếu -> lech = đơn - credit
+    free_phone_txns = bank[bank["used_by"].isna() &
+                           (bank["nonrev_type"] == "") &
+                           (bank["phones_in_text"].apply(len) > 0)]
+    for i, r in orders[orders["match_status"] == "KHÔNG TÌM THẤY"].iterrows():
+        p = r["phone"]
+        if pd.isna(p):
+            continue
+        d = r["order_date"]
+        cand = free_phone_txns[free_phone_txns["phones_in_text"].apply(
+            lambda L: p in L)]
+        if pd.notna(d):
+            cand = cand[abs((cand["txn_date"] - d).dt.days) <= split_window]
+        cand = cand[cand.index.map(lambda j: bank.loc[j, "used_by"] is None)]
+        if not len(cand):
+            continue
+        exp = r["expected_bank"]
+        exact = cand[cand["credit"] == exp]
+        if len(exact):
+            j, status, lech = exact.index[0], "KHỚP QUA SĐT (memo)", 0
+        else:
+            j = cand.index[0]
+            credit = bank.loc[j, "credit"]
+            if credit > exp:
+                status = "KHỚP QUA SĐT — GD GỘP (1 CK nhiều đơn)"
+                lech = 0
+            else:
+                dep = bank.loc[j, "manual_deposit"] if "manual_deposit" \
+                    in bank.columns else np.nan
+                if pd.notna(dep) and abs((credit + dep) - exp) < 1000:
+                    status = "KHỚP QUA SĐT — đã trừ cọc (đủ tiền)"
+                    lech = 0
+                else:
+                    status = "KHỚP QUA SĐT — số tiền NHỎ HƠN đơn (cọc/thiếu)"
+                    lech = exp - credit
+        bank.loc[j, "used_by"] = r["order_id"]
+        orders.loc[i, ["match_status", "matched_txn", "matched_amount",
+                       "lech"]] = [status, bank.loc[j, "txn_id"],
+                                   bank.loc[j, "credit"], lech]
+
+    # Pass 7 (chốt cuối): số tiền đúng + ngày ±35, NHƯNG chỉ khi số tiền đó
+    # là DUY NHẤT trong cửa sổ (tránh khớp nhầm sang khách khác trùng số tiền)
+    for i, r in orders[orders["match_status"] == "KHÔNG TÌM THẤY"].iterrows():
+        if pd.isna(r["order_date"]):
+            continue
+        cand = bank[free() & (bank["credit"] == r["expected_bank"]) &
+                    (abs((bank["txn_date"] - r["order_date"]).dt.days) <= 35)]
+        cand = cand[cand.index.map(lambda j: bank.loc[j, "used_by"] is None)]
+        if len(cand) == 1:  # duy nhất -> an toàn
+            j = cand.index[0]
+            bank.loc[j, "used_by"] = r["order_id"]
+            orders.loc[i, ["match_status", "matched_txn", "matched_amount",
+                           "lech"]] = ["KHỚP (lệch ngày, số tiền duy nhất)",
+                                       bank.loc[j, "txn_id"],
+                                       bank.loc[j, "credit"], 0]
     return orders, bank
 
 
@@ -382,6 +500,10 @@ def error_groups(orders, bank):
         if r["match_status"].startswith("KHỚP ĐÚNG"):
             return "✅ Khớp đúng"
         if r["match_status"].startswith("LỆCH SỐ TIỀN"):
+            return "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)"
+        if "GỘP" in r["match_status"]:
+            return "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)"
+        if r["match_status"].startswith("KHỚP QUA SĐT — số tiền NHỎ"):
             return "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)"
         if r["match_status"].startswith("KHỚP"):
             return "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)"

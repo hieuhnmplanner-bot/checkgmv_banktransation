@@ -12,13 +12,14 @@ import streamlit as st
 
 from recon_engine import (load_orders, load_bank, classify_nonrevenue,
                           match_orders_to_bank, error_groups,
-                          audit_manual_file)
+                          audit_manual_file, attach_manual_phone)
 
 st.set_page_config(page_title="Đối soát GMV vs Bank", page_icon="🏦",
                    layout="wide")
 
 GROUP_COLORS = {
     "✅ Khớp đúng": "#2e7d32",
+    "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)": "#66bb6a",
     "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)": "#fdd835",
     "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)": "#f9a825",
     "🟠 Không thấy — trả qua thẻ/cổng thanh toán (check file cổng)": "#ef6c00",
@@ -108,35 +109,52 @@ def get_df(label, key, kind="orders", help_txt=""):
 
 
 @st.cache_data(ttl=600, show_spinner="Đang đối soát...")
-def run_recon(orders_csv, bank_csv, region, account, date_window,
-              month_from, month_to):
-    orders = load_orders(pd.read_csv(io.StringIO(orders_csv)), region)
-    bank = classify_nonrevenue(
-        load_bank(pd.read_csv(io.StringIO(bank_csv)), account))
-    # giới hạn phạm vi nghiên cứu
+def run_recon(orders_specs, bank_specs, date_window, month_from, month_to,
+              manual_csv=None):
+    """Khớp TẤT CẢ đơn (mọi vùng) với BỂ SAO KÊ CHUNG (mọi tài khoản).
+
+    orders_specs: list các (csv, region)
+    bank_specs:   list các (csv, account)
+    Một đơn HCM có thể khớp giao dịch ở tài khoản HN và ngược lại — tiền về
+    tài khoản nào sẽ hiện ở cột "Tiền về TK".
+    """
+    orders = pd.concat(
+        [load_orders(pd.read_csv(io.StringIO(c)), reg)
+         for c, reg in orders_specs], ignore_index=True)
+    bank = pd.concat(
+        [load_bank(pd.read_csv(io.StringIO(c)), acc)
+         for c, acc in bank_specs], ignore_index=True)
+    bank["txn_id"] = [f"{a}-{i}" for i, a in enumerate(bank["account"])]
+    manual_df = (pd.read_csv(io.StringIO(manual_csv))
+                 if manual_csv else None)
+    bank = attach_manual_phone(bank, manual_df)
+    bank = classify_nonrevenue(bank)
+
     orders = orders[(orders["month"] >= month_from) &
                     (orders["month"] <= month_to)]
-    bank = bank[(bank["month"] >= month_from) & (bank["month"] <= month_to)]
-    o_all, b_all = [], []
+    bank = bank[(bank["month"] >= month_from) &
+                (bank["month"] <= month_to)].copy()
+
+    o_all = []
     used_txn = set()
     for m in sorted(set(orders["month"].dropna())):
         m_start = pd.Period(m).start_time - pd.Timedelta(days=5)
         m_end = pd.Period(m).end_time + pd.Timedelta(days=5)
-        # pool sao kê = tháng m nới ±5 ngày (đơn cuối tháng tiền về đầu tháng sau)
         pool = bank[(bank["txn_date"] >= m_start) &
                     (bank["txn_date"] <= m_end) &
                     (~bank["txn_id"].isin(used_txn))]
         om, bm = match_orders_to_bank(
             orders[orders["month"] == m], pool, date_window=date_window)
-        og, bg = error_groups(om, bm)
+        og, _ = error_groups(om, bm)
+        # gắn tài khoản tiền thực về (theo giao dịch đã khớp)
+        txn_acc = bm.set_index("txn_id")["account"].to_dict()
+        og["paid_into"] = og["matched_txn"].astype(str).str.split(
+            r"[ +|]").str[0].map(txn_acc)
         o_all.append(og)
-        used = bm.loc[bm["used_by"].notna(), "txn_id"]
-        used_txn.update(used)
-        bank.loc[bank["txn_id"].isin(used), "used_by"] = "matched"
-        b_all.append(bg[bg["month"] == m])
+        used_txn.update(bm.loc[bm["used_by"].notna(), "txn_id"])
+
     o_res = (pd.concat(o_all, ignore_index=True)
              if o_all else orders.iloc[0:0])
-    # phía bank: gắn nhãn cuối cùng trên toàn bộ phạm vi
     bank["bank_group"] = ""
     matched_mask = bank["txn_id"].isin(used_txn)
     bank.loc[matched_mask, "bank_group"] = "✅ Đã gắn với đơn"
@@ -180,23 +198,26 @@ if st.sidebar.button("🔄 Tải lại dữ liệu"):
 # ============================================================ RUN
 st.title("🏦 Đối soát Doanh thu vs Sao kê Ngân hàng")
 
-results_o, results_b = [], []
-for od, bk, region, acc in [
-        (df_orders_hn, df_bank_hn, "HN", "HN"),
-        (df_orders_hcm, df_bank_hcm, "HCM", "HCM")]:
-    if od is not None and bk is not None:
-        o, b = run_recon(od.to_csv(index=False), bk.to_csv(index=False),
-                         region, acc, date_window, month_from, month_to)
-        results_o.append(o)
-        results_b.append(b)
+manual_csv = df_manual.to_csv(index=False) if df_manual is not None else None
+orders_specs = []
+if df_orders_hn is not None:
+    orders_specs.append((df_orders_hn.to_csv(index=False), "HN"))
+if df_orders_hcm is not None:
+    orders_specs.append((df_orders_hcm.to_csv(index=False), "HCM"))
+bank_specs = []
+if df_bank_hn is not None:
+    bank_specs.append((df_bank_hn.to_csv(index=False), "HN"))
+if df_bank_hcm is not None:
+    bank_specs.append((df_bank_hcm.to_csv(index=False), "HCM"))
 
-if not results_o:
-    st.info("👈 Dán link Google Sheet (hoặc upload file) cho ít nhất 1 cặp "
-            "**Report đơn + Sao kê** ở thanh bên trái để bắt đầu.")
+if not orders_specs or not bank_specs:
+    st.info("👈 Cần ít nhất 1 **Report đơn** và 1 **Sao kê ngân hàng** "
+            "ở thanh bên trái để bắt đầu. Nạp cả sao kê HN và HCM để dò "
+            "chéo (đơn HCM có thể nhận tiền vào tài khoản HN và ngược lại).")
     st.stop()
 
-orders = pd.concat(results_o, ignore_index=True)
-bank = pd.concat(results_b, ignore_index=True)
+orders, bank = run_recon(orders_specs, bank_specs, date_window,
+                         month_from, month_to, manual_csv)
 
 months = sorted(orders["month"].dropna().unique())
 regions = sorted(orders["region"].unique())
@@ -282,12 +303,12 @@ with tab2:
 
     st.markdown(f"**{len(d)} đơn — tổng lệch "
                 f"{fmt_vnd(d['lech'].abs().sum())} đ**")
-    show = d[["month", "region", "order_date", "customer", "phone", "uid",
-              "package", "sales", "amount", "expected_bank",
+    show = d[["month", "region", "paid_into", "order_date", "customer",
+              "phone", "uid", "package", "sales", "amount", "expected_bank",
               "matched_amount", "lech", "match_status", "matched_txn",
               "pay_method", "note"]].copy()
-    show.columns = ["Tháng", "KV", "Ngày", "Khách", "SĐT", "UID", "Gói",
-                    "Sales", "Real Pay", "Tiền phải về bank",
+    show.columns = ["Tháng", "KV đơn", "Tiền về TK", "Ngày", "Khách", "SĐT",
+                    "UID", "Gói", "Sales", "Real Pay", "Tiền phải về bank",
                     "Tiền tìm thấy", "⚠️ LỆCH", "Trạng thái khớp",
                     "Giao dịch gắn với", "Hình thức TT", "Note"]
     for c in ["Real Pay", "Tiền phải về bank", "Tiền tìm thấy", "⚠️ LỆCH"]:
