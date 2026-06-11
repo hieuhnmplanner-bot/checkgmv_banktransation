@@ -171,24 +171,31 @@ def load_bank(df, account_label):
         return None
 
     c_credit = find("PHAT SINH CO", "CREDIT", "GHI CO")
+    c_debit = find("PHAT SINH NO", "DEBIT", "GHI NO")
     c_eff = find("NGAY HACH TOAN", "HIEU LUC", "EFFECTIVE DATE", "EFFECTIVE")
     c_date = find("NGAY GIAO DICH", "TNX DATE", "NGAY1")
     if c_date == c_eff:
         c_date = None
     c_who = find("DON VI THU HUONG", "DON VI CHUYEN")
     c_detail = find("NOI DUNG", "TRANSACTIONS IN DETAIL", "DETAIL")
-    c_ref = find("BUT TOAN", "DOC NO")
+    c_ref = find("BUT TOAN")
+    # HCM không có BÚT TOÁN -> dùng cột "Ngày1/TNX Date/Số CT/Doc No"
+    c_docno = find("DOC NO", "SO CT", "TNX DATE", "NGAY1")
+    if c_ref is None:
+        c_ref = c_docno
 
     out = pd.DataFrame(index=df.index)
     out["account"] = account_label
     out["credit"] = vnd(df[c_credit]) if c_credit else np.nan
-    # cột ngày có thể dạng "02/01/2026 / 5433 - 52354" -> lấy phần trước " / "
+    out["debit"] = vnd(df[c_debit]) if c_debit else np.nan
+
     def clean_date_col(col):
         s = df[col].astype(str).str.split(" / ").str[0]
         return parse_date_any(s)
+    out["raw_date"] = (df[c_date].astype(str) if c_date
+                       else df[c_eff].astype(str) if c_eff else "")
     out["txn_date"] = clean_date_col(c_date) if c_date else pd.NaT
     out["post_date"] = clean_date_col(c_eff) if c_eff else pd.NaT
-    # nếu cột ngày giao dịch hỏng/thiếu, dùng ngày hiệu lực
     if c_date is None or out["txn_date"].isna().mean() > 0.5:
         out["txn_date"] = out["txn_date"].fillna(out["post_date"])
         if out["txn_date"].isna().all():
@@ -197,7 +204,9 @@ def load_bank(df, account_label):
     out["counterparty"] = df[c_who] if c_who else ""
     out["detail"] = df[c_detail] if c_detail else ""
     out["ref"] = df[c_ref] if c_ref else ""
-    out = out[out["credit"].notna() & (out["credit"] > 0)].copy()
+    # GIỮ TẤT CẢ DÒNG (cả ghi nợ) cho tab tra cứu; matching tự bỏ qua ghi nợ
+    out = out[out["credit"].notna() | out["debit"].notna()].copy()
+    out["is_credit"] = out["credit"].fillna(0) > 0
     out["month"] = out["txn_date"].dt.to_period("M").astype(str)
     text = (out["counterparty"].fillna("").astype(str) + " " +
             out["detail"].fillna("").astype(str))
@@ -295,7 +304,8 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
     orders["matched_txn"] = None
     orders["matched_amount"] = np.nan
 
-    free = lambda: bank["used_by"].isna() & (bank["nonrev_type"] == "")
+    free = lambda: (bank["used_by"].isna() & (bank["nonrev_type"] == "") &
+                    (bank["credit"].fillna(0) > 0))
 
     # "Chủ" của giao dịch = SĐT đã gắn (manual_phone) hoặc SĐT duy nhất trong
     # memo. Giao dịch có chủ thì chỉ được khớp cho đơn của SĐT đó (hoặc nhóm
@@ -550,6 +560,7 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
     #   credit nhỏ hơn            -> cọc/thiếu -> lech = đơn - credit
     free_phone_txns = bank[bank["used_by"].isna() &
                            (bank["nonrev_type"] == "") &
+                           (bank["credit"].fillna(0) > 0) &
                            (bank["phones_in_text"].apply(len) > 0)]
     gw_card = orders["gateway"].astype(str).apply(strip_accents).str.contains(
         EWALLET_RE, na=False)

@@ -135,3 +135,15 @@ Ví dụ thực: Hy Băng (986037282) + Nguyên Khang (913627413) → khớp đ�
 
 Lưu ý: ngân hàng GỬI không xuất hiện trong nội dung sao kê (chỉ có mã napas/FT),
 nên Gateway dùng để kiểm chứng & gom nhóm, không dùng để dò ngược từ memo.
+
+
+## Ô tìm kiếm + 2 tab tra cứu hai chiều  ⭐
+- **Ô tìm SĐT/UID** (trên cùng): lọc nhanh mọi tab theo số điện thoại hoặc UID.
+- **Tab "Nguồn doanh thu điền tay"**: toàn bộ đơn SM Hà Nội + HCM với các cột
+  bank time, Gateway, User Name, Phone, UID, Pay Time, Real Pay(VND) + đánh dấu
+  Tìm thấy bên sao kê chưa, Trạng thái khớp, Lệch, và mô tả ngắn cách khớp.
+- **Tab "Sao Kê Ngân Hàng"**: toàn bộ giao dịch 2 file HN + HCM (cả ghi nợ) với
+  NGÀY GIAO DỊCH, PHÁT SINH NỢ/CÓ, ĐƠN VỊ THỤ HƯỞNG/CHUYỂN, NỘI DUNG,
+  BÚT TOÁN (HCM dùng cột Doc No/Số CT thay thế) + đánh dấu gắn được với đơn nào,
+  trạng thái, lệch, mô tả cách khớp. Hai tab này đối chiếu hai chiều giúp soi
+  nhanh cái nào đúng/sai.

@@ -5,7 +5,9 @@ Chạy: streamlit run app.py
 Nguồn dữ liệu: Google Sheets (link export CSV) hoặc upload file.
 """
 import io
+import re
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -139,6 +141,7 @@ def run_recon(orders_specs, bank_specs, date_window, month_from, month_to,
 
     o_all = []
     used_txn = set()
+    txn_used_by = {}
     for m in sorted(set(orders["month"].dropna())):
         m_start = pd.Period(m).start_time - pd.Timedelta(days=5)
         m_end = pd.Period(m).end_time + pd.Timedelta(days=5)
@@ -148,19 +151,40 @@ def run_recon(orders_specs, bank_specs, date_window, month_from, month_to,
         om, bm = match_orders_to_bank(
             orders[orders["month"] == m], pool, date_window=date_window)
         og, _ = error_groups(om, bm)
-        # gắn tài khoản tiền thực về (theo giao dịch đã khớp)
         txn_acc = bm.set_index("txn_id")["account"].to_dict()
         og["paid_into"] = og["matched_txn"].astype(str).str.split(
             r"[ +|]").str[0].map(txn_acc)
         o_all.append(og)
-        used_txn.update(bm.loc[bm["used_by"].notna(), "txn_id"])
+        matched_bm = bm[bm["used_by"].notna()]
+        used_txn.update(matched_bm["txn_id"])
+        txn_used_by.update(dict(zip(matched_bm["txn_id"],
+                                    matched_bm["used_by"])))
 
     o_res = (pd.concat(o_all, ignore_index=True)
              if o_all else orders.iloc[0:0])
+    bank["used_by"] = bank["txn_id"].map(txn_used_by)
+
+    # map order_id -> thông tin đơn (để tab Sao Kê hiển thị khớp với đơn nào)
+    omap = o_res.set_index("order_id")
+    def order_info(used):
+        if not isinstance(used, str) or not used:
+            return ("", "", np.nan)
+        ids = [x for x in re.split(r"[+|]", used) if x in omap.index]
+        if not ids:
+            return ("", "", np.nan)
+        names = ", ".join(str(omap.loc[i, "customer"]) for i in ids)
+        status = omap.loc[ids[0], "match_status"]
+        lech = sum(float(omap.loc[i, "lech"] or 0) for i in ids)
+        return (names, status, lech)
+
     bank["bank_group"] = ""
     matched_mask = bank["txn_id"].isin(used_txn)
     bank.loc[matched_mask, "bank_group"] = "✅ Đã gắn với đơn"
-    nz = (~matched_mask) & (bank["nonrev_type"] != "")
+    # dòng ghi nợ (chi ra) -> không đối soát doanh thu
+    debit_mask = ~bank["is_credit"].fillna(False)
+    bank.loc[debit_mask & ~matched_mask, "bank_group"] = \
+        "⚪ Ghi nợ / chi ra (không đối soát)"
+    nz = (~matched_mask) & (~debit_mask) & (bank["nonrev_type"] != "")
     bank.loc[nz, "bank_group"] = ("⚪ Không phải doanh thu (" +
                                   bank.loc[nz, "nonrev_type"] + ")")
     rest = bank["bank_group"] == ""
@@ -169,6 +193,11 @@ def run_recon(orders_specs, bank_specs, date_window, month_from, month_to,
     bank.loc[no_rep, "bank_group"] = "⚪ Tháng chưa có report đơn hàng"
     bank.loc[bank["bank_group"] == "", "bank_group"] = \
         "🔴 Tiền vào KHÔNG có đơn nào nhận"
+
+    info = bank["used_by"].apply(order_info)
+    bank["matched_order"] = [x[0] for x in info]
+    bank["match_status"] = [x[1] for x in info]
+    bank["match_lech"] = [x[2] for x in info]
     return o_res, bank
 
 
@@ -224,9 +253,63 @@ orders, bank = run_recon(orders_specs, bank_specs, date_window,
 months = sorted(orders["month"].dropna().unique())
 regions = sorted(orders["region"].unique())
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+
+def match_desc(status):
+    """Mô tả ngắn gọn cách khớp."""
+    s = str(status)
+    table = {
+        "KHỚP ĐÚNG (theo giờ GD)": "Trùng số tiền + đúng giờ giao dịch",
+        "KHỚP ĐÚNG": "Trùng số tiền + đúng ngày",
+        "LỆCH SỐ TIỀN (đúng giờ GD)": "Đúng giờ GD nhưng số tiền lệch",
+        "KHỚP QUA SĐT (memo)": "SĐT khớp trong nội dung CK",
+        "KHỚP QUA SĐT (theo SĐT)": "SĐT khớp trong nội dung CK",
+        "KHỚP QUA SĐT — GD GỘP (1 CK nhiều đơn)":
+            "1 lần CK gộp nhiều đơn (cần tách)",
+        "KHỚP QUA SĐT — đã trừ cọc (đủ tiền)": "Đủ tiền sau khi tính cọc",
+        "KHỚP QUA SĐT — số tiền NHỎ HƠN đơn (cọc/thiếu)":
+            "Tiền về nhỏ hơn đơn (cọc/thiếu)",
+        "KHỚP ANH EM (chung 1 lần chuyển)":
+            "Anh em chung 1 lần chuyển (cùng giờ)",
+        "KHỚP ANH EM (cùng ngày+cổng)":
+            "Anh em chung 1 lần chuyển (cùng ngày+cổng)",
+        "KHỚP CHUNG 1 GIAO DỊCH (2 đơn)": "1 GD trả cho 2 đơn",
+        "KHỚP GỘP 2 GIAO DỊCH (cọc + nốt)": "Cọc + chuyển nốt = 1 đơn",
+        "KHỚP (lệch ngày, số tiền duy nhất)":
+            "Trùng số tiền, lệch ngày (số tiền duy nhất)",
+        "KHÔNG TÌM THẤY": "Không thấy giao dịch khớp",
+    }
+    return table.get(s, s)
+
+
+def found_label(status, group=""):
+    s = str(status)
+    if s.startswith("✅") or "KHỚP" in s and "KHÔNG" not in s:
+        return "✅ Có"
+    if str(group).startswith("🟠"):
+        return "⚠️ Qua cổng"
+    return "❌ Không"
+
+
+# ô tìm SĐT/UID dùng chung
+search = st.text_input("🔎 Tìm theo SĐT hoặc UID",
+                       placeholder="Nhập số điện thoại hoặc UID...").strip()
+
+
+def apply_search_orders(df):
+    if not search:
+        return df
+    s = re.sub(r"\D", "", search)
+    m = pd.Series(False, index=df.index)
+    if s:
+        m |= df["phone"].astype(str).str.contains(s, na=False)
+        m |= df["uid"].astype(str).str.contains(s, na=False)
+    return df[m]
+
+
+tab1, tab2, tab6, tab7, tab3, tab4, tab5 = st.tabs([
     "📊 Tổng quan theo tháng", "🔍 Chi tiết khoản sai",
-    "🏦 Tiền vào không có đơn", "📝 Kiểm tra file điền tay", "❓ Hướng dẫn"])
+    "📋 Nguồn doanh thu điền tay", "🏦 Sao Kê Ngân Hàng",
+    "💸 Tiền vào không có đơn", "📝 Kiểm tra file điền tay", "❓ Hướng dẫn"])
 
 # ============================================================ TAB 1
 with tab1:
@@ -302,6 +385,7 @@ with tab2:
         d = d[~d["error_group"].str.startswith("✅")]
     else:
         d = d[d["error_group"] == sel_g]
+    d = apply_search_orders(d)
 
     st.markdown(f"**{len(d)} đơn — tổng lệch "
                 f"{fmt_vnd(d['lech'].abs().sum())} đ**")
@@ -319,6 +403,96 @@ with tab2:
     st.download_button("⬇️ Tải danh sách này (CSV)",
                        show.to_csv(index=False).encode("utf-8-sig"),
                        file_name="chi_tiet_khoan_sai.csv")
+
+# ============================================================ TAB 6
+with tab6:
+    st.caption("Toàn bộ đơn từ SM Hà Nội + HCM, đánh dấu có tìm thấy bên sao "
+               "kê ngân hàng không, trạng thái khớp và số tiền lệch.")
+    c1, c2, c3 = st.columns(3)
+    sel_m6 = c1.selectbox("Tháng", ["Tất cả"] + list(months), key="t6m")
+    sel_r6 = c2.multiselect("Khu vực", regions, default=regions, key="t6r")
+    sel_f6 = c3.selectbox("Trạng thái", ["Tất cả", "✅ Có", "❌ Không",
+                                         "⚠️ Qua cổng"], key="t6f")
+    d6 = orders[orders["region"].isin(sel_r6)]
+    if sel_m6 != "Tất cả":
+        d6 = d6[d6["month"] == sel_m6]
+    d6 = apply_search_orders(d6)
+
+    d6 = d6.copy()
+    d6["bank_time"] = d6["order_ts"].dt.strftime("%d/%m/%Y %H:%M").fillna("")
+    d6["pay_time_s"] = d6["pay_time"].dt.strftime("%d/%m/%Y").fillna("")
+    d6["found"] = [found_label(s, g) for s, g in
+                   zip(d6["match_status"], d6["error_group"])]
+    d6["desc"] = d6["match_status"].map(match_desc)
+    if sel_f6 != "Tất cả":
+        d6 = d6[d6["found"] == sel_f6]
+
+    st.markdown(f"**{len(d6)} đơn** — tìm thấy: "
+                f"{(d6['found'] == '✅ Có').sum()} | không: "
+                f"{(d6['found'] == '❌ Không').sum()} | qua cổng: "
+                f"{(d6['found'] == '⚠️ Qua cổng').sum()}")
+    show6 = d6[["region", "bank_time", "gateway", "customer", "phone", "uid",
+                "pay_time_s", "amount", "found", "paid_into", "error_group",
+                "lech", "desc"]].copy()
+    show6.columns = ["KV", "Bank time", "Gateway", "User Name", "Phone",
+                     "UID", "Pay Time", "Real Pay(VND)", "Tìm thấy?",
+                     "Tiền về TK", "Trạng thái khớp", "Lệch", "Cách khớp"]
+    show6["Real Pay(VND)"] = show6["Real Pay(VND)"].map(fmt_vnd)
+    show6["Lệch"] = show6["Lệch"].map(fmt_vnd)
+    st.dataframe(show6, use_container_width=True, hide_index=True, height=540)
+    st.download_button("⬇️ Tải bảng này (CSV)",
+                       show6.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="nguon_doanh_thu_dien_tay.csv", key="dl6")
+
+# ============================================================ TAB 7
+with tab7:
+    st.caption("Toàn bộ giao dịch từ 2 file sao kê HN + HCM, đánh dấu có gắn "
+               "được với đơn doanh thu không, trạng thái khớp và số tiền lệch. "
+               "(HCM không có cột Bút toán → dùng cột Doc No/Số CT thay thế.)")
+    c1, c2, c3 = st.columns(3)
+    sel_m7 = c1.selectbox("Tháng", ["Tất cả"] + list(months), key="t7m")
+    sel_a7 = c2.multiselect("Tài khoản", sorted(bank["account"].unique()),
+                            default=sorted(bank["account"].unique()), key="t7a")
+    sel_f7 = c3.selectbox("Lọc", ["Tất cả", "✅ Đã gắn đơn",
+                                  "🔴 Tiền vào chưa có đơn",
+                                  "Chỉ tiền vào (credit)"], key="t7f")
+    bb7 = bank[bank["account"].isin(sel_a7)].copy()
+    if sel_m7 != "Tất cả":
+        bb7 = bb7[bb7["month"] == sel_m7]
+    if search:
+        s = re.sub(r"\D", "", search)
+        if s:
+            bb7 = bb7[bb7["detail"].astype(str).str.replace(r"\D", "",
+                      regex=True).str.contains(s, na=False) |
+                      bb7["matched_order"].astype(str).str.contains(
+                          search, na=False)]
+    if sel_f7 == "✅ Đã gắn đơn":
+        bb7 = bb7[bb7["bank_group"].str.startswith("✅")]
+    elif sel_f7 == "🔴 Tiền vào chưa có đơn":
+        bb7 = bb7[bb7["bank_group"].str.startswith("🔴")]
+    elif sel_f7 == "Chỉ tiền vào (credit)":
+        bb7 = bb7[bb7["is_credit"].fillna(False)]
+
+    bb7["found"] = np.where(
+        bb7["bank_group"].str.startswith("✅"), "✅ Có",
+        np.where(bb7["bank_group"].str.startswith("🔴"), "❌ Không", "—"))
+    bb7["desc"] = bb7["match_status"].map(match_desc)
+    st.markdown(f"**{len(bb7)} giao dịch** — đã gắn đơn: "
+                f"{(bb7['found'] == '✅ Có').sum()} | chưa: "
+                f"{(bb7['found'] == '❌ Không').sum()}")
+    show7 = bb7[["account", "raw_date", "debit", "credit", "counterparty",
+                 "detail", "ref", "found", "matched_order", "bank_group",
+                 "match_lech", "desc"]].copy()
+    show7.columns = ["TK", "NGÀY GIAO DỊCH", "PHÁT SINH NỢ", "PHÁT SINH CÓ",
+                     "ĐƠN VỊ THỤ HƯỞNG/CHUYỂN", "NỘI DUNG", "BÚT TOÁN/Doc No",
+                     "Tìm thấy đơn?", "Khớp với đơn", "Trạng thái", "Lệch",
+                     "Cách khớp"]
+    for c in ["PHÁT SINH NỢ", "PHÁT SINH CÓ", "Lệch"]:
+        show7[c] = show7[c].map(fmt_vnd)
+    st.dataframe(show7, use_container_width=True, hide_index=True, height=540)
+    st.download_button("⬇️ Tải bảng này (CSV)",
+                       show7.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="sao_ke_ngan_hang.csv", key="dl7")
 
 # ============================================================ TAB 3
 with tab3:
