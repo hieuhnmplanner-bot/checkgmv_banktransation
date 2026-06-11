@@ -20,6 +20,8 @@ st.set_page_config(page_title="Đối soát GMV vs Bank", page_icon="🏦",
 GROUP_COLORS = {
     "✅ Khớp đúng": "#2e7d32",
     "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)": "#66bb6a",
+    "🟢 Khớp anh em (chung 1 lần chuyển)": "#4caf50",
+    "🟢 Thu nhiều đợt — phần còn lại là cọc/đợt trước (lần TT thứ 2+)": "#43a047",
     "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)": "#fdd835",
     "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)": "#f9a825",
     "🟠 Không thấy — trả qua thẻ/cổng thanh toán (check file cổng)": "#ef6c00",

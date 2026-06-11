@@ -27,22 +27,36 @@ def vnd(series):
 
 
 def parse_date_any(series):
-    """Chấp nhận dd/mm/yyyy [hh:mm:ss], yyyy/m/d, datetime sẵn có."""
+    """Chấp nhận dd/mm/yyyy [hh:mm:ss], yyyy/m/d, và object chứa datetime.
+
+    Cảnh báo: cột Excel kiểu 'object' có thể chứa datetime thật. Không được
+    ép qua chuỗi rồi parse (pandas suy luận sai định dạng -> đảo ngày/tháng).
+    """
+    import datetime as _dt
     if pd.api.types.is_datetime64_any_dtype(series):
         return pd.to_datetime(series, errors="coerce")
-    s = series.astype(str).str.strip().str.replace("\n", " ", regex=False)
-    out = pd.to_datetime(s, format="%d/%m/%Y %H:%M:%S", errors="coerce")
-    for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%Y-%m-%d"):
-        mask = out.isna()
-        if not mask.any():
-            break
-        out.loc[mask] = pd.to_datetime(s[mask], format=fmt, errors="coerce")
-    mask = out.isna()
-    if mask.any():
-        with __import__("warnings").catch_warnings():
-            __import__("warnings").simplefilter("ignore")
-            out.loc[mask] = pd.to_datetime(s[mask], errors="coerce",
-                                           dayfirst=True)
+    out = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    is_dtobj = series.map(
+        lambda x: isinstance(x, (_dt.datetime, _dt.date, pd.Timestamp)))
+    if is_dtobj.any():
+        out.loc[is_dtobj] = pd.to_datetime(series[is_dtobj], errors="coerce")
+    rest = ~is_dtobj
+    if rest.any():
+        s = (series[rest].astype(str).str.strip()
+             .str.replace("\n", " ", regex=False))
+        o = pd.to_datetime(s, format="%d/%m/%Y %H:%M:%S", errors="coerce")
+        for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%Y-%m-%d", "%d/%m/%y"):
+            mask = o.isna()
+            if not mask.any():
+                break
+            o.loc[mask] = pd.to_datetime(s[mask], format=fmt, errors="coerce")
+        mask = o.isna()
+        if mask.any():
+            with __import__("warnings").catch_warnings():
+                __import__("warnings").simplefilter("ignore")
+                o.loc[mask] = pd.to_datetime(s[mask], errors="coerce",
+                                             dayfirst=True)
+        out.loc[rest] = o
     return out
 
 
@@ -54,7 +68,7 @@ def norm_phone(series):
     # bỏ mã nước phổ biến (84 VN, 81 JP, 82 KR, 49 DE...) nếu còn dài hơn 9 số
     def strip_cc(x):
         if len(x) > 9:
-            for cc in ("84", "81", "82", "49", "1"):
+            for cc in ("84", "81", "82", "49"):
                 if x.startswith(cc) and len(x) - len(cc) >= 8:
                     return x[len(cc):].lstrip("0")
         return x
@@ -70,6 +84,15 @@ def strip_accents(text):
 
 
 PHONE_IN_TEXT = re.compile(r"0\d{8,10}|84\d{9,10}")
+
+# Cổng/ví điện tử: tiền về dạng cục, không phải credit ngân hàng lẻ -> nhóm 🟠
+EWALLET_RE = ("VIMO|NGAN LUONG|NGANLUONG|MOMO|ZALO|SHOPEE|VIETTEL|"
+              "CREDIT|VISA|MASTER")
+
+
+def is_ewallet_gateway(series):
+    return series.astype(str).apply(strip_accents).str.contains(
+        EWALLET_RE, na=False)
 
 
 def phones_from_text(text):
@@ -274,6 +297,23 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
 
     free = lambda: bank["used_by"].isna() & (bank["nonrev_type"] == "")
 
+    # "Chủ" của giao dịch = SĐT đã gắn (manual_phone) hoặc SĐT duy nhất trong
+    # memo. Giao dịch có chủ thì chỉ được khớp cho đơn của SĐT đó (hoặc nhóm
+    # anh em chứa SĐT đó) — không cho đơn khác trùng số tiền chiếm mất.
+    def owner_of(j):
+        mp = bank.loc[j, "manual_phone"] if "manual_phone" in bank.columns \
+            else np.nan
+        if isinstance(mp, str) and mp:
+            return mp
+        pl = bank.loc[j, "phones_in_text"]
+        return pl[0] if len(pl) == 1 else None
+
+    bank["_owner"] = [owner_of(j) for j in bank.index]
+
+    def ok_owner(j, phone):
+        o = bank.loc[j, "_owner"]
+        return (o is None) or (pd.notna(phone) and o == phone)
+
     # Pass 0: khớp theo giờ giao dịch (bank day + bank time). Giờ trong report
     # thường ghi lỏng nên chỉ nhận 2 trường hợp chắc chắn:
     #  a) đúng số tiền + trong ±60 phút  -> KHỚP ĐÚNG
@@ -288,6 +328,7 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
                             (b_sorted["txn_date"] <= hi)]
             cand = cand[cand.index.map(
                 lambda j: bank.loc[j, "used_by"] is None)]
+            cand = cand[[ok_owner(j, r["phone"]) for j in cand.index]]
             if not len(cand):
                 continue
             exact = cand[cand["credit"] == r["expected_bank"]]
@@ -318,6 +359,7 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
         cand = bank[free() & (bank["credit"] == r["expected_bank"]) &
                     (abs((bank["txn_date"] - r["order_date"]).dt.days)
                      <= date_window)]
+        cand = cand[[ok_owner(j, r["phone"]) for j in cand.index]]
         if len(cand):
             j = cand.index[0]
             bank.loc[j, "used_by"] = r["order_id"]
@@ -392,6 +434,80 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
         orders["match_status"] != "KHÔNG TÌM THẤY",
         orders["expected_bank"])
 
+    # Pass 5a: ANH EM CHUNG 1 LẦN CHUYỂN — các đơn có CÙNG dấu thời gian
+    # thanh toán (order_ts) là cùng một lần chuyển của phụ huynh. Gộp tổng các
+    # đơn đó, tìm 1 giao dịch = tổng (ưu tiên trùng giờ trong ngày). Bắt được
+    # cả khi mỗi bé một SĐT và sao kê chỉ ghi tên/SĐT một bé.
+    nf_ts = orders[(orders["match_status"] == "KHÔNG TÌM THẤY") &
+                   orders["order_ts"].notna()]
+    for ts, grp in nf_ts.groupby("order_ts"):
+        idx = [i for i in grp.index
+               if orders.loc[i, "match_status"] == "KHÔNG TÌM THẤY"]
+        if len(idx) < 2 or len(idx) > 6:
+            continue
+        # kiểm chứng: anh em chung 1 lần chuyển thì cùng Gateway (ngân hàng gửi)
+        gws = set(orders.loc[idx, "gateway"].astype(str).apply(strip_accents))
+        gws.discard("X")
+        gws.discard("NAN")
+        if len(gws) > 1:
+            continue
+        total = sum(orders.loc[i, "expected_bank"] for i in idx)
+        cand = bank[free() & (bank["credit"] == total) &
+                    (abs((bank["txn_date"] - ts).dt.days) <= split_window)]
+        cand = cand[cand.index.map(lambda j: bank.loc[j, "used_by"] is None)]
+        if not len(cand):
+            continue
+        tod = ts - ts.normalize()
+        j = (((cand["txn_date"] - cand["txn_date"].dt.normalize()) - tod)
+             .abs().idxmin())
+        bank.loc[j, "used_by"] = "+".join(orders.loc[idx, "order_id"])
+        for ii in idx:
+            orders.loc[ii, ["match_status", "matched_txn", "matched_amount",
+                            "lech"]] = [
+                "KHỚP ANH EM (chung 1 lần chuyển)", bank.loc[j, "txn_id"],
+                orders.loc[ii, "expected_bank"], 0]
+
+    # Pass 5b: anh em GHI LỆCH GIỜ — gom theo cùng NGÀY + cùng GATEWAY
+    # (ngân hàng gửi), thử cặp/bộ ba cộng đúng 1 giao dịch. Dùng khi report ghi
+    # giờ thanh toán của các bé lệch nhau nên Pass 5a (cùng giờ) không bắt được.
+    from itertools import combinations
+    nf2 = orders[orders["match_status"] == "KHÔNG TÌM THẤY"].copy()
+    nf2["gw"] = nf2["gateway"].astype(str).apply(strip_accents)
+    nf2 = nf2[~nf2["gw"].isin(["X", "NAN", ""]) &
+              ~is_ewallet_gateway(nf2["gateway"]) &
+              nf2["order_date"].notna()]
+    for (d, gw), grp in nf2.groupby([nf2["order_date"].dt.date, "gw"]):
+        idx = [i for i in grp.index
+               if orders.loc[i, "match_status"] == "KHÔNG TÌM THẤY"]
+        if len(idx) < 2 or len(idx) > 8:
+            continue
+        d0 = pd.Timestamp(d)
+        for size in (2, 3):
+            done = False
+            for combo in combinations(idx, size):
+                if any(orders.loc[i, "match_status"] != "KHÔNG TÌM THẤY"
+                       for i in combo):
+                    continue
+                total = sum(orders.loc[i, "expected_bank"] for i in combo)
+                cand = bank[free() & (bank["credit"] == total) &
+                            (abs((bank["txn_date"] - d0).dt.days) <= 5)]
+                cand = cand[cand.index.map(
+                    lambda j: bank.loc[j, "used_by"] is None)]
+                if len(cand) != 1:   # chỉ nhận khi DUY NHẤT -> an toàn
+                    continue
+                j = cand.index[0]
+                bank.loc[j, "used_by"] = "+".join(
+                    orders.loc[list(combo), "order_id"])
+                for ii in combo:
+                    orders.loc[ii, ["match_status", "matched_txn",
+                                    "matched_amount", "lech"]] = [
+                        "KHỚP ANH EM (cùng ngày+cổng)", bank.loc[j, "txn_id"],
+                        orders.loc[ii, "expected_bank"], 0]
+                done = True
+                break
+            if done:
+                break
+
     # Pass 5: 1 giao dịch trả cho 2 đơn (chung nhà / mua 2 đơn) — cùng SĐT hoặc cùng ngày+sales
     nf = orders[orders["match_status"] == "KHÔNG TÌM THẤY"]
     for key_cols in (["phone"], ["order_date", "sales"]):
@@ -435,9 +551,15 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
     free_phone_txns = bank[bank["used_by"].isna() &
                            (bank["nonrev_type"] == "") &
                            (bank["phones_in_text"].apply(len) > 0)]
+    gw_card = orders["gateway"].astype(str).apply(strip_accents).str.contains(
+        EWALLET_RE, na=False)
     for i, r in orders[orders["match_status"] == "KHÔNG TÌM THẤY"].iterrows():
         p = r["phone"]
         if pd.isna(p):
+            continue
+        # đơn trả qua cổng (VIMO/Ngân Lượng/thẻ) -> để rơi vào nhóm 🟠,
+        # KHÔNG ép khớp vào 1 giao dịch lẻ trùng SĐT
+        if bool(gw_card.get(i, False)):
             continue
         d = r["order_date"]
         cand = free_phone_txns[free_phone_txns["phones_in_text"].apply(
@@ -454,18 +576,21 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
         else:
             j = cand.index[0]
             credit = bank.loc[j, "credit"]
+            dep = bank.loc[j, "manual_deposit"] if "manual_deposit" \
+                in bank.columns else np.nan
             if credit > exp:
                 status = "KHỚP QUA SĐT — GD GỘP (1 CK nhiều đơn)"
                 lech = 0
+            elif pd.notna(dep) and abs((credit + dep) - exp) < 1000:
+                status = "KHỚP QUA SĐT — đã trừ cọc (đủ tiền)"
+                lech = 0
+            elif credit >= 0.3 * exp:
+                status = "KHỚP QUA SĐT — số tiền NHỎ HƠN đơn (cọc/thiếu)"
+                lech = exp - credit
             else:
-                dep = bank.loc[j, "manual_deposit"] if "manual_deposit" \
-                    in bank.columns else np.nan
-                if pd.notna(dep) and abs((credit + dep) - exp) < 1000:
-                    status = "KHỚP QUA SĐT — đã trừ cọc (đủ tiền)"
-                    lech = 0
-                else:
-                    status = "KHỚP QUA SĐT — số tiền NHỎ HƠN đơn (cọc/thiếu)"
-                    lech = exp - credit
+                # giao dịch quá nhỏ so với đơn -> nhiều khả năng không liên quan
+                # (vd đơn trả tách thẻ + chuyển khoản) -> để review, không ép
+                continue
         bank.loc[j, "used_by"] = r["order_id"]
         orders.loc[i, ["match_status", "matched_txn", "matched_amount",
                        "lech"]] = [status, bank.loc[j, "txn_id"],
@@ -479,6 +604,7 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
         cand = bank[free() & (bank["credit"] == r["expected_bank"]) &
                     (abs((bank["txn_date"] - r["order_date"]).dt.days) <= 35)]
         cand = cand[cand.index.map(lambda j: bank.loc[j, "used_by"] is None)]
+        cand = cand[[ok_owner(j, r["phone"]) for j in cand.index]]
         if len(cand) == 1:  # duy nhất -> an toàn
             j = cand.index[0]
             bank.loc[j, "used_by"] = r["order_id"]
@@ -486,15 +612,16 @@ def match_orders_to_bank(orders, bank, date_window=3, split_window=35):
                            "lech"]] = ["KHỚP (lệch ngày, số tiền duy nhất)",
                                        bank.loc[j, "txn_id"],
                                        bank.loc[j, "credit"], 0]
+    bank.drop(columns=["_owner"], inplace=True, errors="ignore")
     return orders, bank
 
 
 def error_groups(orders, bank):
     """Tổng hợp lỗi sai theo nhóm, theo tháng."""
     o = orders.copy()
-    # đơn trả qua cổng thanh toán: Gateway = VIMO / Ngân Lượng / credit
+    # đơn trả qua cổng/ví điện tử: Gateway = VIMO/Ngân Lượng/Momo/Zalo/...
     is_card = o["gateway"].astype(str).apply(strip_accents).str.contains(
-        "VIMO|NGAN LUONG|NGANLUONG|CREDIT|VISA|MASTER", na=False)
+        EWALLET_RE, na=False)
 
     def group_of(r):
         if r["match_status"].startswith("KHỚP ĐÚNG"):
@@ -503,7 +630,14 @@ def error_groups(orders, bank):
             return "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)"
         if "GỘP" in r["match_status"]:
             return "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)"
+        if r["match_status"].startswith("KHỚP ANH EM"):
+            return "🟢 Khớp anh em (chung 1 lần chuyển)"
         if r["match_status"].startswith("KHỚP QUA SĐT — số tiền NHỎ"):
+            # lần thanh toán thứ 2+ -> phần thiếu nhiều khả năng là cọc/đợt trước
+            pm = strip_accents(str(r.get("pay_method", "")))
+            if pm and not pm.startswith("1ST"):
+                return ("🟢 Thu nhiều đợt — phần còn lại là cọc/đợt trước "
+                        "(lần TT thứ 2+)")
             return "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)"
         if r["match_status"].startswith("KHỚP"):
             return "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)"

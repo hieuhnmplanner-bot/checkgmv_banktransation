@@ -90,3 +90,48 @@ chỉ cần nạp vào là bể chung tự mở rộng, đơn nào tiền về �
 
 File điền tay hiện khớp theo timestamp với sao kê HN (sao kê HCM/VCB chỉ có
 ngày, không có giờ) — nên nó phủ luôn các đơn HCM chuyển vào tài khoản HN.
+
+
+## Sửa lỗi quan trọng (từ feedback dữ liệu)  ⭐
+1. **Bug đảo ngày/tháng**: cột `bank day` là object chứa datetime; bước parse
+   dự phòng từng đảo ngày↔tháng với giá trị mơ hồ (ngày ≤ 12), khiến nhiều đơn
+   tháng 1 bị đẩy sang tháng khác và báo 🔴 oan. Đã sửa: nhận diện datetime gốc,
+   không ép qua chuỗi. Sau khi sửa, ✅ khớp đúng tăng mạnh.
+2. **Bug cắt số điện thoại**: `norm_phone` cắt nhầm chữ số "1" đầu như mã quốc
+   gia (vd 1079347605 → 79347605). Đã bỏ "1" khỏi danh sách mã quốc gia.
+3. **Đơn trả qua cổng (VIMO/thẻ)**: không còn ép khớp vào 1 giao dịch lẻ trùng
+   SĐT; xếp thẳng vào 🟠 "trả qua thẻ/cổng" để đối soát bằng file settlement.
+4. **Thu nhiều đợt**: đơn lần TT thứ 2+ còn thiếu một phần → nhóm mới
+   🟢 "Thu nhiều đợt — phần còn lại là cọc/đợt trước", không tính là mất tiền
+   (phần thiếu thường là cọc đóng ở kỳ trước, có thể ngoài phạm vi nghiên cứu).
+
+### Ca chưa tự khớp được (cần sửa ở khâu nhập liệu)
+Phụ huynh chuyển 1 lần cho 2 bé nhưng sao kê điền tay chỉ điền **1 SĐT** →
+giao dịch mang SĐT bé kia, không tìm theo SĐT bé này được. Khắc phục gốc: điền
+đủ SĐT cả 2 bé, hoặc liên kết theo phụ huynh/UID trong mô hình dữ liệu chuẩn hóa.
+
+
+## Tự tìm "anh em chung 1 lần chuyển"  ⭐
+Phụ huynh chuyển 1 lần cho nhiều bé, sao kê chỉ điền 1 SĐT. Engine tự tìm bằng:
+1. Các đơn có **cùng dấu thời gian thanh toán** (bank day + bank time) là cùng
+   một lần chuyển → gộp tổng, tìm giao dịch = tổng (ưu tiên trùng giờ trong ngày).
+2. **Khóa chủ giao dịch**: giao dịch đã gắn SĐT cụ thể (qua file điền tay hoặc
+   memo) chỉ được khớp cho đơn của SĐT đó / nhóm anh em chứa nó — không cho đơn
+   khác trùng số tiền chiếm. Nhờ vậy giao dịch "Khangbang" 9.080.000 được giữ
+   đúng cho cặp Khang + Băng thay vì bị 1 trong 30 đơn lẻ 9.080.000 lấy mất.
+Ví dụ thực: Hy Băng (986037282) + Nguyên Khang (913627413) → khớp đúng vào 1 GD.
+
+
+## Dùng Gateway (ngân hàng gửi) làm tín hiệu  ⭐
+- **Kiểm chứng anh em**: các đơn anh em chung 1 lần chuyển phải cùng Gateway
+  (cùng ngân hàng gửi) — chặn việc gộp nhầm 2 đơn trùng giờ nhưng khác nguồn.
+- **Pass anh em theo ngày+Gateway**: khi report ghi giờ thanh toán các bé lệch
+  nhau, gom theo cùng ngày + cùng Gateway, thử cặp/bộ ba cộng đúng 1 giao dịch
+  (chỉ nhận khi giao dịch đó DUY NHẤT trong cửa sổ -> an toàn). Không cần memo
+  ghi tên vẫn khớp được.
+- **Ví điện tử**: Momo, Zalopay, ViettelPay/Viettel Money, VIMO, Ngân Lượng →
+  xếp nhóm 🟠 (tiền về dạng cục qua cổng, không phải credit ngân hàng lẻ;
+  đối soát bằng file settlement của cổng).
+
+Lưu ý: ngân hàng GỬI không xuất hiện trong nội dung sao kê (chỉ có mã napas/FT),
+nên Gateway dùng để kiểm chứng & gom nhóm, không dùng để dò ngược từ memo.
