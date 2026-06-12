@@ -162,3 +162,33 @@ nên Gateway dùng để kiểm chứng & gom nhóm, không dùng để dò ngư
   từng đơn (trống với đơn qua cổng).
 - Metric tổng quan: "Đơn cần xử lý" chỉ đếm 🔴 + 🟡 lệch thật; đơn qua cổng
   tách riêng, không tính là tiền lệch.
+
+
+## Xử lý thêm các ca nhiều giao dịch / tag sai SĐT  ⭐
+- **Gộp nhiều khoản cùng SĐT** (cọc + hoàn thiện cùng ngày): 1 đơn trả bằng
+  nhiều giao dịch cùng gắn đúng SĐT, tổng khớp -> gộp, lech 0
+  (vd 3305598868: 40.000 + 16.920.000 = 16.960.000).
+- **Combo nhiều gói cùng người**: vd 366346066: 2 gói 9.275.000 + 4.740.000
+  = 2 GD 10.800.000 + 3.215.000, tổng khớp -> lech 0.
+- **Khớp qua tên trong nội dung CK**: khi file điền tay gắn SĐT sai nhưng memo
+  ghi đúng tên khách + đúng số tiền + đúng ngày -> khớp (vd 914290611 memo
+  "be Mai Khanh"). An toàn vì đòi đủ tên + đúng tiền + ngày ±2 + ứng viên duy nhất.
+
+### Ca cố ý KHÔNG tự khớp (cần sửa khâu nhập liệu)
+983888631: giao dịch đúng số tiền nhưng file điền tay gắn SĐT của KHÁCH KHÁC,
+và memo không ghi tên khách này. Tự gán sẽ rủi ro lấy nhầm tiền của người khác,
+nên để 🔴 chờ kiểm tra. Khắc phục gốc: sửa SĐT trong file điền tay cho đúng.
+
+
+## Pass khớp KHÔNG dựa SĐT (số tiền + ngày + nội dung)  ⭐
+Cho các ca file điền tay gắn SĐT sai (vd 983888631, 914290611):
+- **Khớp qua tên trong nội dung CK** (Pass B): đúng số tiền + ngày ±2 + đủ tên
+  khách trong memo + ứng viên duy nhất -> khớp (vd 914290611 memo "be Mai Khanh").
+- **Khớp số tiền + ngày 1-1 duy nhất** (Pass C): khi đúng 1 đơn chưa khớp và
+  đúng 1 giao dịch tự do cùng số tiền trong ±2 ngày -> ghép, BỎ QUA SĐT (vì có
+  thể gắn sai). Xếp nhóm 🟡 "cần xem" để kiểm chứng (vd 983888631).
+Hai pass này chạy SAU cùng nên không ảnh hưởng khớp chắc chắn phía trước.
+
+Lưu ý: nếu đang xem bản cũ, các case 366346066 / 3305598868 vẫn hiện lệch hoặc
+ghép nhiều giao dịch. Sau khi deploy bản mới nhất, search 366346066 ở tab Sao Kê
+chỉ còn đúng 2 giao dịch (3.215.000 + 10.800.000).

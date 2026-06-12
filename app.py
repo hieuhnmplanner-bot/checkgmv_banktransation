@@ -24,6 +24,9 @@ GROUP_COLORS = {
     "🟢 Khớp qua SĐT — giao dịch gộp (cần tách thủ công)": "#66bb6a",
     "🟢 Khớp anh em (chung 1 lần chuyển)": "#4caf50",
     "🟢 Khớp combo nhiều gói (tổng khớp)": "#388e3c",
+    "🟢 Khớp gộp nhiều khoản cùng SĐT (cọc+hoàn thiện)": "#2e7d32",
+    "🟢 Khớp qua tên trong nội dung CK": "#1b5e20",
+    "🟡 Khớp số tiền+ngày (1-1, SĐT lệch — cần xem)": "#f9a825",
     "🟢 Thu nhiều đợt — phần còn lại là cọc/đợt trước (lần TT thứ 2+)": "#43a047",
     "🟡 Lệch số tiền (tìm thấy giao dịch, sai số)": "#fdd835",
     "🟡 Khớp nhưng cần xem (SĐT/lệch ngày/gộp cọc)": "#f9a825",
@@ -275,6 +278,12 @@ def match_desc(status):
             "Anh em chung 1 lần chuyển (cùng ngày+cổng)",
         "KHỚP COMBO nhiều gói (tổng khớp)":
             "Nhiều gói cùng người — tổng tiền khớp",
+        "KHỚP GỘP NHIỀU KHOẢN CÙNG SĐT (cọc+hoàn thiện)":
+            "Gộp nhiều khoản cùng SĐT (cọc + hoàn thiện)",
+        "KHỚP QUA TÊN trong nội dung CK":
+            "Khớp đúng số tiền + tên khách trong nội dung CK",
+        "KHỚP SỐ TIỀN+NGÀY (1-1 duy nhất)":
+            "Khớp số tiền + ngày (1-1 duy nhất; SĐT điền tay lệch)",
         "KHỚP CHUNG 1 GIAO DỊCH (2 đơn)": "1 GD trả cho 2 đơn",
         "KHỚP GỘP 2 GIAO DỊCH (cọc + nốt)": "Cọc + chuyển nốt = 1 đơn",
         "KHỚP (lệch ngày, số tiền duy nhất)":
